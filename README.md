@@ -1,5 +1,5 @@
 # baobab-angular
-A state handling library for Angular, based on Baobab
+A state handling library for Angular, based on [Baobab](https://github.com/Yomguithereal/baobab).
 
 ```js
 angular.module('app', ['baobab'])
@@ -20,5 +20,22 @@ angular.module('app', ['baobab'])
       $scope.todos = myTree.select('todos').get();
     });
 
+  });
+```
+
+One can define configuration variables by returning an array:
+
+```js
+angular.module('app', ['baobab'])
+  .tree('myTree', function () {
+    return [
+      {
+        todos: []
+      },
+      {
+        autoCommit: false,
+        maxHistory: 10
+      }
+    ];
   });
 ```
