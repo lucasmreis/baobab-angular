@@ -11,21 +11,22 @@ var safeDeepClone = require('./safeDeepClone.js');
 var BaobabService = function () {
   
   this.createTree = function (tree) {
-    return new Baobab(tree, {
-      clone: true,
-      cloningFunction: function (obj) {
-        return safeDeepClone('[circular]',[], obj);
-      }
-    });
+    if (Array.isArray(tree)) {
+      return new Baobab(tree[0], tree[1]); 
+    } else {
+      return new Baobab(tree, {
+        clone: true,
+        cloningFunction: function (obj) {
+          return safeDeepClone('[circular]',[], obj);
+        }
+      });
+    }
   };
-
 };
 
+// Monkeypatch angular module (add .tree)
 
-
-// Monkeypatch angular module (add .store)
-
-// Wrap "angular.module" to attach store method to module instance
+// Wrap "angular.module" to attach tree method to module instance
 var angularModule = angular.module;
 angular.module = function () {
 
@@ -40,6 +41,8 @@ angular.module = function () {
 
       var tree = $injector.invoke(treeDefinition);
       var instance = baobab.createTree(tree);
+
+      // Update event triggers dirty-checking
       instance.on('update', function () {
         setTimeout(function () {
           $rootScope.$apply();
@@ -58,8 +61,8 @@ angular.module = function () {
 };
 
 angular.module('baobab', [])
-  .provider('baobab', function FluxProvider () {
-    this.$get = [function fluxFactory () {
+  .provider('baobab', function BaobabProvider () {
+    this.$get = [function treeFactory () {
       return new BaobabService();
     }];
   })
@@ -87,19 +90,44 @@ angular.module('baobab', [])
   }]);
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./safeDeepClone.js":15,"angular":"angular","baobab":3}],2:[function(require,module,exports){
-module.exports={
-  "autoCommit": true,
-  "asynchronous": true,
-  "clone": false,
-  "cloningFunction": null,
-  "cursorSingletons": true,
-  "maxHistory": 0,
-  "mixins": [],
-  "shiftReferences": false,
-  "typology": null,
-  "validate": null
-}
+},{"./safeDeepClone.js":14,"angular":"angular","baobab":3}],2:[function(require,module,exports){
+/**
+ * Baobab Default Options
+ * =======================
+ *
+ */
+module.exports = {
+
+  // Should the tree handle its transactions on its own?
+  autoCommit: true,
+
+  // Should the transactions be handled asynchronously?
+  asynchronous: true,
+
+  // Should the tree clone data when giving it back to the user?
+  clone: false,
+
+  // Which cloning function should the tree use?
+  cloningFunction: null,
+
+  // Should cursors be singletons?
+  cursorSingletons: true,
+
+  // Maximum records in the tree's history
+  maxHistory: 0,
+
+  // Collection of react mixins to merge with the tree's ones
+  mixins: [],
+
+  // Should the tree shift its internal reference when applying mutations?
+  shiftReferences: false,
+
+  // Custom typology object to use along with the validation utilities
+  typology: null,
+
+  // Validation specifications
+  validate: null
+};
 
 },{}],3:[function(require,module,exports){
 /**
@@ -113,7 +141,7 @@ var Baobab = require('./src/baobab.js'),
 
 // Non-writable version
 Object.defineProperty(Baobab, 'version', {
-  value: '0.3.2'
+  value: '0.4.0'
 });
 
 // Exposing helpers
@@ -458,6 +486,7 @@ module.exports = Baobab;
         n,
         j,
         m,
+        z,
         a,
         event,
         child,
@@ -487,15 +516,33 @@ module.exports = Baobab;
         a = [];
 
         for (j = 0, m = handlers.length; j !== m; j += 1) {
-          handlers[j].handler.call(
-            'scope' in handlers[j] ? handlers[j].scope : this,
-            event
-          );
-          if (!handlers[j].once)
-            a.push(handlers[j]);
+
+          // We have to verify that the handler still exists in the array,
+          // as it might have been mutated already
+          if (
+            (
+              this._handlers[eventName] &&
+              this._handlers[eventName].indexOf(handlers[j]) >= 0
+            ) ||
+            this._handlersAll.indexOf(handlers[j]) >= 0
+          ) {
+            handlers[j].handler.call(
+              'scope' in handlers[j] ? handlers[j].scope : this,
+              event
+            );
+
+            // Since the listener callback can mutate the _handlers,
+            // we register the handlers we want to remove, not the ones
+            // we want to keep
+            if (handlers[j].once)
+              a.push(handlers[j]);
+          }
         }
 
-        this._handlers[eventName] = a;
+        // Go through handlers to remove
+        for (z = 0; z < a.length; z++) {
+          this._handlers[eventName].splice(a.indexOf(a[z]), 1);
+        }
       }
     }
 
@@ -533,6 +580,52 @@ module.exports = Baobab;
     this._children.push(child);
 
     return child;
+  };
+
+  /**
+   * This returns an array of handler functions corresponding to the given
+   * event or every handler functions if an event were not to be given.
+   *
+   * @param  {?string} event Name of the event.
+   * @return {Emitter} Returns this.
+   */
+  function mapHandlers(a) {
+    var i, l, h = [];
+
+    for (i = 0, l = a.length; i < l; i++)
+      h.push(a[i].handler);
+
+    return h;
+  }
+
+  Emitter.prototype.listeners = function(event) {
+    var handlers = [],
+        k,
+        i,
+        l;
+
+    // If no event is passed, we return every handlers
+    if (!event) {
+      handlers = mapHandlers(this._handlersAll);
+
+      for (k in this._handlers)
+        handlers = handlers.concat(mapHandlers(this._handlers[k]));
+
+      // Retrieving handlers per children
+      for (i = 0, l = this._children.length; i < l; i++)
+        handlers = handlers.concat(this._children[i].listeners());
+    }
+
+    // Else we only retrieve the needed handlers
+    else {
+      handlers = mapHandlers(this._handlers[event]);
+
+      // Retrieving handlers per children
+      for (i = 0, l = this._children.length; i < l; i++)
+        handlers = handlers.concat(this._children[i].listeners(event));
+    }
+
+    return handlers;
   };
 
 
@@ -584,7 +677,7 @@ module.exports = Baobab;
   /**
    * Version:
    */
-  Emitter.version = '2.1.1';
+  Emitter.version = '2.1.2';
 
 
   // Export:
@@ -1202,7 +1295,6 @@ module.exports = Baobab;
 })(this);
 
 },{}],6:[function(require,module,exports){
-(function (process){
 /**
  * Baobab Data Structure
  * ======================
@@ -1216,13 +1308,20 @@ var Cursor = require('./cursor.js'),
     update = require('./update.js'),
     merge = require('./merge.js'),
     mixins = require('./mixins.js'),
-    defaults = require('../defaults.json'),
+    defaults = require('../defaults.js'),
     type = require('./type.js');
+
+function complexHash(type) {
+  return type + '$' +
+    (new Date()).getTime() + (''  + Math.random()).replace('0.', '');
+}
 
 /**
  * Main Class
  */
 function Baobab(initialData, opts) {
+  if (arguments.length < 1)
+    initialData = {};
 
   // New keyword optional
   if (!(this instanceof Baobab))
@@ -1239,10 +1338,10 @@ function Baobab(initialData, opts) {
   this._cloner = this.options.cloningFunction || helpers.deepClone;
 
   // Privates
-  this._futureUpdate = {};
-  this._willUpdate = false;
+  this._transaction = {};
+  this._future = undefined;
   this._history = [];
-  this._registeredCursors = {};
+  this._cursors = {};
 
   // Internal typology
   this.typology = this.options.typology ?
@@ -1252,7 +1351,7 @@ function Baobab(initialData, opts) {
     new Typology();
 
   // Internal validation
-  this.validate = this.options.validate || null;
+  this.validate = this.options.validate || null;
 
   if (this.validate)
     try {
@@ -1275,34 +1374,6 @@ helpers.inherits(Baobab, EventEmitter);
 /**
  * Private prototype
  */
-Baobab.prototype._stack = function(spec) {
-  var self = this;
-
-  if (!type.Object(spec))
-    throw Error('Baobab.update: wrong specification.');
-
-  this._futureUpdate = merge(spec, this._futureUpdate);
-
-  // Should we let the user commit?
-  if (!this.options.autoCommit)
-    return this;
-
-  // Should we update synchronously?
-  if (!this.options.asynchronous)
-    return this.commit();
-
-  // Updating asynchronously
-  if (!this._willUpdate) {
-    this._willUpdate = true;
-    process.nextTick(function() {
-      if (self._willUpdate)
-        self.commit();
-    });
-  }
-
-  return this;
-};
-
 Baobab.prototype._archive = function() {
   if (this.options.maxHistory <= 0)
     return;
@@ -1341,7 +1412,7 @@ Baobab.prototype.commit = function(referenceRecord) {
 
     // Applying modification (mutation)
     var record = this._archive();
-    log = update(this.data, this._futureUpdate, this.options);
+    log = update(this.data, this._transaction, this.options);
 
     if (record)
       record.log = log;
@@ -1378,8 +1449,10 @@ Baobab.prototype.commit = function(referenceRecord) {
   });
 
   // Resetting
-  this._futureUpdate = {};
-  this._willUpdate = false;
+  this._transaction = {};
+
+  if (this._future)
+    this._future = clearTimeout(this._future);
 
   return this;
 };
@@ -1407,15 +1480,22 @@ Baobab.prototype.select = function(path) {
     return new Cursor(this, path);
   }
   else {
-    var hash = path.join('λ');
+    var hash = path.map(function(step) {
+      if (type.Function(step))
+        return complexHash('fn');
+      else if (type.Object(step))
+        return complexHash('ob');
+      else
+        return step;
+    }).join('λ');
 
-    if (!this._registeredCursors[hash]) {
-      var cursor = new Cursor(this, path, solvedPath);
-      this._registeredCursors[hash] = cursor;
+    if (!this._cursors[hash]) {
+      var cursor = new Cursor(this, path, solvedPath, hash);
+      this._cursors[hash] = cursor;
       return cursor;
     }
     else {
-      return this._registeredCursors[hash];
+      return this._cursors[hash];
     }
   }
 };
@@ -1455,8 +1535,37 @@ Baobab.prototype.set = function(key, val) {
   return this.update(spec);
 };
 
+Baobab.prototype.unset = function(key) {
+  if (!key && key !== 0)
+    throw Error('Baobab.unset: expects a valid key to unset.');
+
+  var spec = {};
+  spec[key] = {$unset: true};
+
+  return this.update(spec);
+};
+
 Baobab.prototype.update = function(spec) {
-  return this._stack(spec);
+  var self = this;
+
+  if (!type.Object(spec))
+    throw Error('Baobab.update: wrong specification.');
+
+  this._transaction = merge(spec, this._transaction);
+
+  // Should we let the user commit?
+  if (!this.options.autoCommit)
+    return this;
+
+  // Should we update synchronously?
+  if (!this.options.asynchronous)
+    return this.commit();
+
+  // Updating asynchronously
+  if (!this._future)
+    this._future = setTimeout(self.commit.bind(self, null), 0);
+
+  return this;
 };
 
 Baobab.prototype.hasHistory = function() {
@@ -1476,11 +1585,15 @@ Baobab.prototype.undo = function() {
 };
 
 Baobab.prototype.release = function() {
-  this.unbindAll();
+  this.kill();
   delete this.data;
-  delete this._futureUpdate;
+  delete this._transaction;
   delete this._history;
-  delete this._registeredCursors;
+
+  // Releasing cursors
+  for (var k in this._cursors)
+    this._cursors[k].release();
+  delete this._cursors;
 };
 
 /**
@@ -1495,8 +1608,7 @@ Baobab.prototype.toJSON = function() {
  */
 module.exports = Baobab;
 
-}).call(this,require('_process'))
-},{"../defaults.json":2,"./cursor.js":8,"./helpers.js":9,"./merge.js":10,"./mixins.js":11,"./type.js":12,"./update.js":13,"_process":14,"emmett":4,"typology":5}],7:[function(require,module,exports){
+},{"../defaults.js":2,"./cursor.js":8,"./helpers.js":9,"./merge.js":10,"./mixins.js":11,"./type.js":12,"./update.js":13,"emmett":4,"typology":5}],7:[function(require,module,exports){
 /**
  * Baobab Cursor Combination
  * ==========================
@@ -1561,7 +1673,7 @@ function Combination(operator /*, &cursors */) {
 
     for (i = 1, l = self.cursors.length; i < l; i++) {
       shouldFire = self.operators[i - 1] === 'or' ?
-        shouldFire || self.updates[i] :
+        shouldFire || self.updates[i] :
         shouldFire && self.updates[i];
     }
 
@@ -1612,7 +1724,7 @@ makeOperator('and');
 Combination.prototype.release = function() {
 
   // Dropping own listeners
-  this.unbindAll();
+  this.kill();
 
   // Dropping cursors listeners
   this.cursors.forEach(function(cursor) {
@@ -1650,18 +1762,19 @@ var EventEmitter = require('emmett'),
 /**
  * Main Class
  */
-function Cursor(root, path, solvedPath) {
+function Cursor(root, path, solvedPath, hash) {
   var self = this;
 
   // Extending event emitter
   EventEmitter.call(this);
 
   // Enforcing array
-  path = path || [];
+  path = path || [];
 
   // Properties
   this.root = root;
   this.path = path;
+  this.hash = hash;
   this.relevant = this.reference() !== undefined;
 
   // Complex path?
@@ -1713,7 +1826,7 @@ function Cursor(root, path, solvedPath) {
       if (data && shouldFire) {
         self.emit('update');
       }
-      else {
+      else if (!data) {
         self.emit('irrelevant');
         self.relevant = false;
       }
@@ -1735,14 +1848,6 @@ function Cursor(root, path, solvedPath) {
 }
 
 helpers.inherits(Cursor, EventEmitter);
-
-/**
- * Private prototype
- */
-Cursor.prototype._stack = function(spec) {
-  this.root._stack(helpers.pathObject(this.solvedPath, spec));
-  return this;
-};
 
 /**
  * Predicates
@@ -1879,6 +1984,19 @@ Cursor.prototype.edit = function(value) {
   return this.update({$set: value});
 };
 
+Cursor.prototype.unset = function(key) {
+  if (!key && key !== 0)
+    throw Error('baobab.Cursor.unset: expects a valid key to unset.');
+
+  var spec = {};
+  spec[key] = {$unset: true};
+  return this.update(spec);
+};
+
+Cursor.prototype.remove = function() {
+  return this.update({$unset: true});
+};
+
 Cursor.prototype.apply = function(fn) {
   if (typeof fn !== 'function')
     throw Error('baobab.Cursor.apply: argument is not a function.');
@@ -1926,7 +2044,8 @@ Cursor.prototype.merge = function(o) {
 };
 
 Cursor.prototype.update = function(spec) {
-  return this._stack(spec);
+  this.root.update(helpers.pathObject(this.solvedPath, spec));
+  return this;
 };
 
 /**
@@ -1945,8 +2064,10 @@ Cursor.prototype.and = function(otherCursor) {
  */
 Cursor.prototype.release = function() {
   this.root.off('update', this.updateHandler);
+  if (this.hash)
+    delete this.root._cursors[this.hash];
   this.root = null;
-  this.unbindAll();
+  this.kill();
 };
 
 /**
@@ -1990,57 +2111,68 @@ function shallowMerge(o1, o2) {
   return o;
 }
 
-// Shallow clone
-function shallowClone(item) {
-  if (!item || !(item instanceof Object))
-    return item;
+// Clone a regexp
+function cloneRegexp(re) {
+  var pattern = re.source,
+      flags = '';
 
-  // Array
-  if (type.Array(item))
-    return item.slice(0);
+  if (re.global) flags += 'g';
+  if (re.multiline) flags += 'm';
+  if (re.ignoreCase) flags += 'i';
+  if (re.sticky) flags += 'y';
+  if (re.unicode) flags += 'u';
 
-  // Date
-  if (type.Date(item))
-    return new Date(item.getTime());
-
-  // Object
-  if (type.Object(item)) {
-    var k, o = {};
-    for (k in item)
-      o[k] = item[k];
-    return o;
-  }
-
-  return item;
+  return new RegExp(pattern, flags);
 }
 
-// Deep clone
-function deepClone(item) {
-  if (!item || !(item instanceof Object))
+// Cloning function
+function clone(deep, item) {
+  if (!item ||
+      typeof item !== 'object' ||
+      item instanceof Error ||
+      item instanceof ArrayBuffer)
     return item;
 
   // Array
   if (type.Array(item)) {
-    var i, l, a = [];
-    for (i = 0, l = item.length; i < l; i++)
-      a.push(deepClone(item[i]));
-    return a;
+    if (deep) {
+      var i, l, a = [];
+      for (i = 0, l = item.length; i < l; i++)
+        a.push(deepClone(item[i]));
+      return a;
+    }
+    else {
+      return item.slice(0);
+    }
   }
 
   // Date
   if (type.Date(item))
     return new Date(item.getTime());
 
+  // RegExp
+  if (item instanceof RegExp)
+    return cloneRegexp(item);
+
   // Object
   if (type.Object(item)) {
     var k, o = {};
+
+    if (item.constructor && item.constructor !== Object)
+      o = Object.create(item.constructor.prototype);
+
     for (k in item)
-      o[k] = deepClone(item[k]);
+      if (item.hasOwnProperty(k))
+        o[k] = deep ? deepClone(item[k]) : item[k];
     return o;
   }
 
   return item;
 }
+
+// Shallow & deep cloning functions
+var shallowClone = clone.bind(null, false),
+    deepClone = clone.bind(null, true);
 
 // Simplistic composition
 function compose(fn1, fn2) {
@@ -2240,31 +2372,42 @@ function merge() {
 
     // Upper $set/$apply... and conflicts
     // When solving conflicts, here is the priority to apply:
+    // -- 0) $unset
     // -- 1) $set
     // -- 2) $merge
     // -- 3) $apply
     // -- 4) $chain
-    if (arguments[i].$set) {
+    if (arguments[i].$unset) {
+      delete res.$set;
       delete res.$apply;
       delete res.$merge;
+      res.$unset = arguments[i].$unset;
+    }
+    else if (arguments[i].$set) {
+      delete res.$apply;
+      delete res.$merge;
+      delete res.$unset;
       res.$set = arguments[i].$set;
       continue;
     }
     else if (arguments[i].$merge) {
       delete res.$set;
       delete res.$apply;
+      delete res.$unset;
       res.$merge = arguments[i].$merge;
       continue;
     }
     else if (arguments[i].$apply){
       delete res.$set;
       delete res.$merge;
+      delete res.$unset;
       res.$apply = arguments[i].$apply;
       continue;
     }
     else if (arguments[i].$chain) {
       delete res.$set;
       delete res.$merge;
+      delete res.$unset;
 
       if (res.$apply)
         res.$apply = helpers.compose(res.$apply, arguments[i].$chain);
@@ -2384,7 +2527,7 @@ module.exports = {
                   this.cursors[k] = baobab.select(this.cursors[k]);
               }
 
-              this.__getCursorData = (function() {
+              this.__getCursorData = (function() {
                 var d = {};
                 for (k in this.cursors)
                   d[k] = this.cursors[k].get();
@@ -2461,6 +2604,8 @@ module.exports = {
  *
  * Misc helpers functions used throughout the library to perform some type
  * tests at runtime.
+ *
+ * @christianalfoni
  */
 
 // Not reusing methods as it will just be an extra
@@ -2552,13 +2697,12 @@ type.MixinCursor = function (value) {
 // Already know this is an array
 type.ComplexPath = function (value) {
   var complexTypes = ['object', 'function'];
-  var hasComplexTypes = false;
   for (var x = 0; x < value.length; x++) {
     if (complexTypes.indexOf(type(value[x])) >= 0) {
-      hasComplexTypes = true;
+      return true;
     }
   }
-  return hasComplexTypes;
+  return false;
 };
 
 module.exports = type;
@@ -2587,7 +2731,7 @@ var COMMANDS = {};
 
 // Helpers
 function makeError(path, message) {
-  var e = new Error('precursors.update: ' + message + ' at path /' +
+  var e = new Error('baobab.update: ' + message + ' at path /' +
                     path.toString());
 
   e.path = path;
@@ -2596,7 +2740,7 @@ function makeError(path, message) {
 
 // Core function
 function update(target, spec, opts) {
-  opts = opts || {};
+  opts = opts || {};
   var log = {};
 
   // Closure mutating the internal object
@@ -2641,7 +2785,13 @@ function update(target, spec, opts) {
       else {
         h = hash ? hash + 'λ' + k : k;
 
-        if ('$set' in (spec[k] || {})) {
+        if ('$unset' in (spec[k] || {})) {
+
+          // Logging update
+          log[h] = true;
+          delete o[k];
+        }
+        else if ('$set' in (spec[k] || {})) {
           v = spec[k].$set;
 
           // Logging update
@@ -2719,71 +2869,6 @@ function update(target, spec, opts) {
 module.exports = update;
 
 },{"./helpers.js":9,"./type.js":12}],14:[function(require,module,exports){
-// shim for using process in browser
-
-var process = module.exports = {};
-
-process.nextTick = (function () {
-    var canSetImmediate = typeof window !== 'undefined'
-    && window.setImmediate;
-    var canPost = typeof window !== 'undefined'
-    && window.postMessage && window.addEventListener
-    ;
-
-    if (canSetImmediate) {
-        return function (f) { return window.setImmediate(f) };
-    }
-
-    if (canPost) {
-        var queue = [];
-        window.addEventListener('message', function (ev) {
-            var source = ev.source;
-            if ((source === window || source === null) && ev.data === 'process-tick') {
-                ev.stopPropagation();
-                if (queue.length > 0) {
-                    var fn = queue.shift();
-                    fn();
-                }
-            }
-        }, true);
-
-        return function nextTick(fn) {
-            queue.push(fn);
-            window.postMessage('process-tick', '*');
-        };
-    }
-
-    return function nextTick(fn) {
-        setTimeout(fn, 0);
-    };
-})();
-
-process.title = 'browser';
-process.browser = true;
-process.env = {};
-process.argv = [];
-
-function noop() {}
-
-process.on = noop;
-process.addListener = noop;
-process.once = noop;
-process.off = noop;
-process.removeListener = noop;
-process.removeAllListeners = noop;
-process.emit = noop;
-
-process.binding = function (name) {
-    throw new Error('process.binding is not supported');
-}
-
-// TODO(shtylman)
-process.cwd = function () { return '/' };
-process.chdir = function (dir) {
-    throw new Error('process.chdir is not supported');
-};
-
-},{}],15:[function(require,module,exports){
 /* global Blob */
 /* global File */
 

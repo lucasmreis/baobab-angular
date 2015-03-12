@@ -9,21 +9,22 @@ var safeDeepClone = require('./safeDeepClone.js');
 var BaobabService = function () {
   
   this.createTree = function (tree) {
-    return new Baobab(tree, {
-      clone: true,
-      cloningFunction: function (obj) {
-        return safeDeepClone('[circular]',[], obj);
-      }
-    });
+    if (Array.isArray(tree)) {
+      return new Baobab(tree[0], tree[1]); 
+    } else {
+      return new Baobab(tree, {
+        clone: true,
+        cloningFunction: function (obj) {
+          return safeDeepClone('[circular]',[], obj);
+        }
+      });
+    }
   };
-
 };
 
+// Monkeypatch angular module (add .tree)
 
-
-// Monkeypatch angular module (add .store)
-
-// Wrap "angular.module" to attach store method to module instance
+// Wrap "angular.module" to attach tree method to module instance
 var angularModule = angular.module;
 angular.module = function () {
 
@@ -38,6 +39,8 @@ angular.module = function () {
 
       var tree = $injector.invoke(treeDefinition);
       var instance = baobab.createTree(tree);
+
+      // Update event triggers dirty-checking
       instance.on('update', function () {
         setTimeout(function () {
           $rootScope.$apply();
@@ -56,8 +59,8 @@ angular.module = function () {
 };
 
 angular.module('baobab', [])
-  .provider('baobab', function FluxProvider () {
-    this.$get = [function fluxFactory () {
+  .provider('baobab', function BaobabProvider () {
+    this.$get = [function treeFactory () {
       return new BaobabService();
     }];
   })
